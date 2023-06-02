@@ -11,9 +11,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <opencv2/opencv.hpp>
 #include "pgm.h"
 
 using namespace std;
+using namespace cv;
 
 //-------------------------------------------------------------------
 PGMImage::PGMImage(char *fname)
@@ -67,4 +69,25 @@ bool PGMImage::write(char *fname)
    fwrite(pixels, 1, x_dim*y_dim, ofile);
    fclose(ofile);
    return 1;
+}
+//-------------------------------------------------------------------
+Mat PGMImage::make_image() {
+    unsigned char pixel_value;
+    Mat image = Mat::zeros(Size(x_dim,y_dim), CV_8UC3);
+
+    for(int x = 0; x < x_dim; x++) {
+        for(int y = 0; y < y_dim; y++) {
+            pixel_value = pixels[x_dim * y + x];
+            if (pixel_value != 0) {
+                image.at<Vec3b>(Point(x, y)) = Vec3b(pixel_value, pixel_value, pixel_value);
+            }
+        }
+    }
+    return image;
+}
+
+bool PGMImage::to_jpg(char *location) {
+    Mat image = make_image();
+    imwrite(location, image);
+    return false;
 }
