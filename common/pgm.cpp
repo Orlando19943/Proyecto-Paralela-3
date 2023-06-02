@@ -12,6 +12,7 @@
 #include <string.h>
 #include <assert.h>
 #include <opencv2/opencv.hpp>
+#include <math.h>
 #include "pgm.h"
 
 using namespace std;
@@ -88,6 +89,34 @@ Mat PGMImage::make_image() {
 
 bool PGMImage::to_jpg(char *location) {
     Mat image = make_image();
-    imwrite(location, image);
-    return false;
+    return imwrite(location, image);
+}
+//-------------------------------------------------------------------
+int PGMImage::get_y(float radius, float degree, int x) {
+    return y_dim / 2 - ((radius - (x - x_dim / 2) * cos(degree)) / sin(degree));
+}
+
+bool PGMImage::to_jpg_with_line(char *location, int *accumulator, int threshold, int total_degree_bins, int degree_increment, int total_radial_bins) {
+    Mat image = make_image();
+
+    float max_radius = sqrt(1.0 * x_dim * x_dim + 1.0 * y_dim * y_dim) / 2;
+    float radial_bin_width = 2 * max_radius / total_radial_bins;
+
+    const float degree_bin_width = degree_increment * M_PI / 180;
+
+    for (int degree_bin = 0; degree_bin < total_degree_bins; degree_bin++){
+        for (int radial_bin = 0; radial_bin < total_radial_bins; radial_bin++) {
+            if (accumulator[radial_bin * total_degree_bins + degree_bin] > threshold) {
+                float radius = radial_bin * radial_bin_width - max_radius;
+                float degree = degree_bin * degree_bin_width;
+
+                int initial_y = get_y(radius, degree, 0);
+                int final_y = get_y(radius, degree, x_dim - 1);
+                printf("initial %d, final %d \n", initial_y, final_y);
+
+                line(image, Point(0, initial_y), Point(x_dim - 1, final_y), (0, 0, 255), 1);
+            }
+        }
+    }
+    return imwrite(location, image);
 }
