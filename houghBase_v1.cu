@@ -15,6 +15,8 @@
 #include <string.h>
 #include <unistd.h>
 #include "common/pgm.h"
+#include <iostream>
+#include <fstream>
 
 const int degree_increment = 2;
 const int total_degree_bins = 180 / degree_increment;
@@ -29,12 +31,16 @@ const char *RED = "\033[91m";
 const char *CLEAR = "\033[0m";
 const char *GREEN = "\033[92m";
 
-#define START_GPU_TIMING() cudaEventRecord(start)
-#define END_GPU_TIMING(time)      \
-    cudaEventRecord(stop);        \
-    cudaEventSynchronize(stop);   \
-    cudaEventElapsedTime(time, start, stop)
+#define START_GPU_TIMING(filename)     \
+    cudaEventRecord(start);            \
+    file.open(filename, std::ios::app)
 
+#define END_GPU_TIMING(time)                  \
+    cudaEventRecord(stop);                    \
+    cudaEventSynchronize(stop);               \
+    cudaEventElapsedTime(&time, start, stop); \
+    file << time << '\n';                     \
+    file.close()
 
 /*  ********************************** COMPARE RESULTS ************************************
     * Compara los resultados en memoria de un array en cpu y otro array en memoria CUDA.
@@ -351,6 +357,8 @@ int main(int argc, char **argv) {
     //  =======================================================================================
     //  ============================ START ACTUAL CALCULATIONS ================================
     //  =======================================================================================
+    std::ofstream file;
+
     int *device_accumulator;
     cudaMalloc((void **) &device_accumulator, sizeof(int) * total_degree_bins * total_radial_bins);
 
@@ -365,10 +373,10 @@ int main(int argc, char **argv) {
     CPU_HoughTran(inImg.pixels, width, height, &cpu_accumulator);
 
     // ------------------ GPU - No Shared Memory Nor constant memory -----------------
-    printf("\n%s%sGPU - No const nor shared mem%s\n", BOLD, RED, CLEAR);
+    printf("\n%s%sGPU - Sin memoria compartida ni constante %s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_bins);
 
-    START_GPU_TIMING();
+    START_GPU_TIMING("out/gpu_hough_trans.txt");
     GPU_HoughTran<<<blockNum, threads_per_block>>>(
             image_in_device,
             width,
@@ -379,16 +387,16 @@ int main(int argc, char **argv) {
             precomputed_cos,
             precomputed_sin
     );
-    END_GPU_TIMING(&milliseconds);
+    END_GPU_TIMING(milliseconds);
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
 
     // ------------------------------ GPU - const memory ------------------------------
-    printf("\n%s%sGPU - Precomputed Sin and Cos (const memory) %s\n", BOLD, RED, CLEAR);
+    printf("\n%s%sGPU - Sin memoria compartida, pero con memoria constante %s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_bins);
 
-    START_GPU_TIMING();
+    START_GPU_TIMING("out/gpu_hough_trans_const.txt");
     GPU_HoughTranConst<<<blockNum, threads_per_block>>>(
             image_in_device,
             width,
@@ -397,16 +405,16 @@ int main(int argc, char **argv) {
             max_radius,
             radial_bin_width
     );
-    END_GPU_TIMING(&milliseconds);
+    END_GPU_TIMING(milliseconds);
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
 
     // --------------------- GPU - const memory and shared memory --------------------
-    printf("\n%s%sGPU - Shared memory %s\n", BOLD, RED, CLEAR);
+    printf("\n%s%sGPU - Memoria compartida y memoria constante %s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_bins);
 
-    START_GPU_TIMING();
+    START_GPU_TIMING("out/gpu_hough_trans_const_shared.txt");
     GPU_HoughTranShared<<<blockNum, threads_per_block>>>(
             image_in_device,
             width,
@@ -415,7 +423,7 @@ int main(int argc, char **argv) {
             max_radius,
             radial_bin_width
     );
-    END_GPU_TIMING(&milliseconds);
+    END_GPU_TIMING(milliseconds);
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
@@ -428,7 +436,7 @@ int main(int argc, char **argv) {
     inImg.to_jpg_with_line(
             "out/test.jpg",
             cpu_accumulator,
-            4600,
+            4300,
             total_degree_bins,
             degree_increment,
             total_radial_bins
