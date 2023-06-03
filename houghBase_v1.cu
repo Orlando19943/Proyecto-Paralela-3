@@ -75,31 +75,29 @@ void CPU_HoughTran(const unsigned char *picture, int width, int height, int **ac
 
 // GPU kernel. One thread per image pixel is spawned.
 // The accummulator memory needs to be allocated by the host in global memory
-__global__ void GPU_HoughTran(unsigned char *pic, int w, int h, int *acc, float rMax, float rScale, float *d_Cos, float *d_Sin)
+__global__ void GPU_HoughTran(unsigned char *picture, int width, int height, int *accumulator, float image_diagonal_length, float radial_bin_width, float *precomputed_cos, float *precomputed_sin)
 {
-    int gloID = blockIdx.x * blockDim.x + threadIdx.x;
+    int global_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (gloID >= w * h)
+    if (global_id >= width * height)
         return;
 
-    int xCent = w / 2;
-    int yCent = h / 2;
+    int x_center = width / 2;
+    int y_center = height / 2;
 
-    int xCoord = gloID % w - xCent;
-    int yCoord = yCent - gloID / w;
+    int x = global_id % width - x_center;
+    int y = y_center - global_id / width;
 
     // TODO eventualmente usar memoria compartida para el acumulador
 
-    if (pic[gloID] > 0)
-    {
-        for (int tIdx = 0; tIdx < total_degree_bins; tIdx++)
-        {
+    if (picture[global_id] > 0) {
+        for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
             // TODO utilizar memoria constante para senos y cosenos
-            // float r = xCoord * cos(tIdx) + yCoord * sin(tIdx); //probar con esto para ver diferencia en tiempo
-            float r = xCoord * d_Cos[tIdx] + yCoord * d_Sin[tIdx];
-            int rIdx = (r + rMax) / rScale;
+            // float radius = x * cos(bin_degree) + y * sin(bin_degree); //probar con esto para ver diferencia en tiempo
+            float radius = x * precomputed_cos[bin_degree] + y * precomputed_sin[bin_degree];
+            int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
             // debemos usar atomic, pero que race condition hay si somos un thread por pixel? explique
-            atomicAdd(acc + (rIdx * total_degree_bins + tIdx), 1);
+            atomicAdd(accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
         }
     }
 
@@ -140,22 +138,22 @@ int main(int argc, char **argv) {
     CPU_HoughTran(inImg.pixels, width, height, &cpu_accumulator);
 
     // pre-compute values to be stored
-    float *cosines_values = (float *)malloc(sizeof(float) * total_degree_bins);
-    float *sin_values = (float *)malloc(sizeof(float) * total_degree_bins);
-    float rad = 0;
-    for (i = 0; i < total_degree_bins; i++)
-    {
-        cosines_values[i] = cos(rad);
-        sin_values[i] = sin(rad);
-        rad += degree_bin_width;
+    float *precomputed_cos = (float *)malloc(sizeof(float) * total_degree_bins);
+    float *precomputed_sin = (float *)malloc(sizeof(float) * total_degree_bins);
+
+    float degree = 0;
+    for (i = 0; i < total_degree_bins; i++) {
+        precomputed_cos[i] = cos(degree);
+        precomputed_sin[i] = sin(degree);
+        degree += degree_bin_width;
     }
 
     float max_radius = sqrt(1.0 * width * width + 1.0 * height * height) / 2;
     float rScale = 2 * max_radius / total_radial_bins;
 
     // TODO eventualmente volver memoria global
-    cudaMemcpy(d_Cos, cosines_values, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Sin, sin_values, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Cos, precomputed_cos, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_Sin, precomputed_sin, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
 
     // setup and copy data from host to device
     unsigned char *d_in, *h_in;
@@ -202,8 +200,8 @@ int main(int argc, char **argv) {
     cudaFree(d_hough);
     free(h_hough);
     free(cpu_accumulator);
-    free(cosines_values);
-    free(sin_values);
+    free(precomputed_cos);
+    free(precomputed_sin);
 
     return 0;
 }
