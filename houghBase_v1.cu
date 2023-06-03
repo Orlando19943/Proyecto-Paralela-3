@@ -275,7 +275,7 @@ __global__ void GPU_HoughTranConst(
     }
 }
 
-/*  ****************************** GPU HOUGH TRANS ****************************************
+/*  ************************ GPU HOUGH TRANS PRECOMPUTED *********************************
     * Precalcula la transformada de Hough en la GPU sin memoria compartida, usando cos
     * y sin precalculados como parámetro.
     *
@@ -291,7 +291,7 @@ __global__ void GPU_HoughTranConst(
     * outputs:
     * - accumulator: La lista de votación en CUDA llena.
     ***************************************************************************************/
-__global__ void GPU_HoughTran(
+__global__ void GPU_HoughTranPreComputed(
         unsigned char *picture,
         int width,
         int height,
@@ -314,8 +314,48 @@ __global__ void GPU_HoughTran(
 
     if (picture[global_id] > 0) {
         for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
-            // float radius = x * cos(bin_degree) + y * sin(bin_degree); //probar con esto para ver diferencia en tiempo
             float radius = x * precomputed_cos[bin_degree] + y * precomputed_sin[bin_degree];
+            int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
+            atomicAdd(accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
+        }
+    }
+}
+
+/*  ****************************** GPU HOUGH TRANS ****************************************
+    * Precalcula la transformada de Hough en la GPU sin ningún tipo de optimización
+    *
+    * inputs:
+    * - picture: Puntero de CUDA con la información de la imagen
+    * - width: Ancho de la imagen
+    * - height: Altura de la imagen
+    * - image_diagonal_length: la diagonal de la imagen precalculada
+    * - radial_bin_width: el ancho de cada casilla de la tabla en el eje del radio precalculado
+    *
+    * outputs:
+    * - accumulator: La lista de votación en CUDA llena.
+    ***************************************************************************************/
+__global__ void GPU_HoughTran(
+        unsigned char *picture,
+        int width,
+        int height,
+        int *accumulator,
+        float image_diagonal_length,
+        float radial_bin_width
+) {
+    int global_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (global_id >= width * height)
+        return;
+
+    int x_center = width / 2;
+    int y_center = height / 2;
+
+    int x = global_id % width - x_center;
+    int y = y_center - global_id / width;
+
+    if (picture[global_id] > 0) {
+        for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
+             float radius = x * cos(bin_degree) + y * sin(bin_degree);
             int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
             atomicAdd(accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
         }
@@ -383,6 +423,24 @@ int main(int argc, char **argv) {
             height,
             device_accumulator,
             max_radius,
+            radial_bin_width
+    );
+    END_GPU_TIMING(milliseconds);
+
+    compare_results(cpu_accumulator, device_accumulator);
+    printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
+
+    // ------------------ GPU - No Shared Memory Nor constant memory Cos and Sin PreComputed -----------------
+    printf("\n%s%sGPU - Sin memoria compartida ni constante. Cos y Sin precomputados %s\n", BOLD, RED, CLEAR);
+    cudaMemset(device_accumulator, 0, sizeof(int) * total_bins);
+
+    START_GPU_TIMING("out/gpu_hough_trans_precomputed.txt");
+    GPU_HoughTranPreComputed<<<blockNum, threads_per_block>>>(
+            image_in_device,
+            width,
+            height,
+            device_accumulator,
+            max_radius,
             radial_bin_width,
             precomputed_cos,
             precomputed_sin
@@ -391,6 +449,7 @@ int main(int argc, char **argv) {
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
+
 
     // ------------------------------ GPU - const memory ------------------------------
     printf("\n%s%sGPU - Sin memoria compartida, pero con memoria constante %s\n", BOLD, RED, CLEAR);
