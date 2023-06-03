@@ -112,7 +112,6 @@ bool PGMImage::to_jpg_with_line(char *location, int *accumulator, int threshold,
 
                 int initial_y = get_y(radius, degree, 0);
                 int final_y = get_y(radius, degree, x_dim - 1);
-                printf("initial %d, final %d \n", initial_y, final_y);
 
                 line(image, Point(0, initial_y), Point(x_dim - 1, final_y), (0, 0, 255), 1);
             }

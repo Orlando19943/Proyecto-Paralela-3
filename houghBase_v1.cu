@@ -20,6 +20,23 @@ const int total_degree_bins = 180 / degree_increment;
 const int total_radial_bins = 100;
 const float degree_bin_width = degree_increment * M_PI / 180;
 
+void compare_results(int* cpu_results, int* in_device_results) {
+    int *gpu_results = (int *) malloc(total_degree_bins * total_radial_bins * sizeof(int));
+    cudaMemcpy(gpu_results, in_device_results, sizeof(int) * total_degree_bins * total_radial_bins, cudaMemcpyDeviceToHost);
+
+    int i;
+    int count = 0;
+    for (i = 0; i < total_degree_bins * total_radial_bins; i++) {
+        if (cpu_results[i] != gpu_results[i]) {
+            printf("Calculation mismatch at : %i %i %i\n", i, cpu_results[i], gpu_results[i]);
+            count++;
+        }
+    }
+
+    free(gpu_results);
+    printf("Total mismatches: %i\n", count);
+}
+
 //*****************************************************************
 // The CPU function returns a pointer to the accumulator
 void CPU_HoughTran(const unsigned char *picture, int width, int height, int **accumulator) {
@@ -56,10 +73,39 @@ void CPU_HoughTran(const unsigned char *picture, int width, int height, int **ac
 }
 
 //*****************************************************************
-// TODO usar memoria constante para la tabla de senos y cosenos
-// inicializarlo en main y pasarlo al device
-//__constant__ float d_Cos[total_degree_bins];
-//__constant__ float d_Sin[total_degree_bins];
+__constant__ float pre_cosine[total_degree_bins];
+__constant__ float pre_sin[total_degree_bins];
+
+void precalculate_trigonometry(float **device_cosine, float **device_sin) {
+    float *precomputed_cos = (float *)malloc(sizeof(float) * total_degree_bins);
+    float *precomputed_sin = (float *)malloc(sizeof(float) * total_degree_bins);
+
+    int i;
+    float degree = 0;
+    for (i = 0; i < total_degree_bins; i++) {
+        float cosine = cos(degree);
+        float sine = sin(degree);
+
+        // fill both cosine/sin tables
+        precomputed_cos[i] = cosine;
+        precomputed_sin[i] = sine;
+        pre_cosine[i] = cosine;
+        pre_sin[i] = cosine;
+
+        degree += degree_bin_width;
+    }
+
+    // move to device
+    cudaMalloc((void **)device_cosine, sizeof(float) * total_degree_bins);
+    cudaMalloc((void **)device_sin, sizeof(float) * total_degree_bins);
+
+    cudaMemcpy(*device_cosine, precomputed_cos, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
+    cudaMemcpy(*device_sin, precomputed_sin, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
+
+    free(precomputed_cos);
+    free(precomputed_sin);
+}
+
 
 //*****************************************************************
 // TODO Kernel memoria compartida
@@ -67,16 +113,8 @@ void CPU_HoughTran(const unsigned char *picture, int width, int height, int **ac
 // {
 //   //TODO
 // }
-// TODO Kernel memoria Constante
-// __global__ void GPU_HoughTranConst(...)
-// {
-//   //TODO
-// }
 
-// GPU kernel. One thread per image pixel is spawned.
-// The accummulator memory needs to be allocated by the host in global memory
-__global__ void GPU_HoughTran(unsigned char *picture, int width, int height, int *accumulator, float image_diagonal_length, float radial_bin_width, float *precomputed_cos, float *precomputed_sin)
-{
+__global__ void GPU_HoughTranConst(unsigned char *picture, int width, int height, int *accumulator, float image_diagonal_length, float radial_bin_width) {
     int global_id = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (global_id >= width * height)
@@ -88,11 +126,35 @@ __global__ void GPU_HoughTran(unsigned char *picture, int width, int height, int
     int x = global_id % width - x_center;
     int y = y_center - global_id / width;
 
-    // TODO eventualmente usar memoria compartida para el acumulador
+    if (picture[global_id] > 0) {
+        for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
+            float radius = x * pre_cosine[bin_degree] + y * pre_sin[bin_degree];
+            int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
+            atomicAdd(accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
+        }
+    }
+
+    // TODO eventualmente cuando se tenga memoria compartida, copiar del local al global
+    // utilizar operaciones atomicas para seguridad
+    // faltara sincronizar los hilos del bloque en algunos lados
+}
+
+// GPU kernel. One thread per image pixel is spawned.
+// The accummulator memory needs to be allocated by the host in global memory
+__global__ void GPU_HoughTran(unsigned char *picture, int width, int height, int *accumulator, float image_diagonal_length, float radial_bin_width, float *precomputed_cos, float *precomputed_sin) {
+    int global_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (global_id >= width * height)
+        return;
+
+    int x_center = width / 2;
+    int y_center = height / 2;
+
+    int x = global_id % width - x_center;
+    int y = y_center - global_id / width;
 
     if (picture[global_id] > 0) {
         for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
-            // TODO utilizar memoria constante para senos y cosenos
             // float radius = x * cos(bin_degree) + y * sin(bin_degree); //probar con esto para ver diferencia en tiempo
             float radius = x * precomputed_cos[bin_degree] + y * precomputed_sin[bin_degree];
             int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
@@ -117,91 +179,58 @@ int main(int argc, char **argv) {
     printf("Loading image %s\n", argv[1]);
 
     PGMImage inImg(argv[1]);
-
     int *cpu_accumulator;
     int width = inImg.x_dim;
     int height = inImg.y_dim;
 
     printf("Image size is %d x %d\n", width, height);
 
-    float *d_Cos;
-    float *d_Sin;
-
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-
-    cudaMalloc((void **)&d_Cos, sizeof(float) * total_degree_bins);
-    cudaMalloc((void **)&d_Sin, sizeof(float) * total_degree_bins);
 
     // CPU calculation
     CPU_HoughTran(inImg.pixels, width, height, &cpu_accumulator);
 
     // pre-compute values to be stored
-    float *precomputed_cos = (float *)malloc(sizeof(float) * total_degree_bins);
-    float *precomputed_sin = (float *)malloc(sizeof(float) * total_degree_bins);
-
-    float degree = 0;
-    for (i = 0; i < total_degree_bins; i++) {
-        precomputed_cos[i] = cos(degree);
-        precomputed_sin[i] = sin(degree);
-        degree += degree_bin_width;
-    }
+    float *precomputed_cos, *precomputed_sin;
+    precalculate_trigonometry(&precomputed_cos, &precomputed_sin);
 
     float max_radius = sqrt(1.0 * width * width + 1.0 * height * height) / 2;
-    float rScale = 2 * max_radius / total_radial_bins;
-
-    // TODO eventualmente volver memoria global
-    cudaMemcpy(d_Cos, precomputed_cos, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Sin, precomputed_sin, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
+    float radial_bin_width = 2 * max_radius / total_radial_bins;
 
     // setup and copy data from host to device
-    unsigned char *d_in, *h_in;
-    int *d_hough, *h_hough;
+    unsigned char *image_in_device;
+    int *d_hough;
 
-    h_in = inImg.pixels; // h_in contiene los pixeles de la imagen
-
-    h_hough = (int *)malloc(total_degree_bins * total_radial_bins * sizeof(int));
-
-    cudaMalloc((void **)&d_in, sizeof(unsigned char) * width * height);
+    cudaMalloc((void **)&image_in_device, sizeof(unsigned char) * width * height);
     cudaMalloc((void **)&d_hough, sizeof(int) * total_degree_bins * total_radial_bins);
-    cudaMemcpy(d_in, h_in, sizeof(unsigned char) * width * height, cudaMemcpyHostToDevice);
+    cudaMemcpy(image_in_device, inImg.pixels, sizeof(unsigned char) * width * height, cudaMemcpyHostToDevice);
     cudaMemset(d_hough, 0, sizeof(int) * total_degree_bins * total_radial_bins);
 
     // execution configuration uses a 1-D grid of 1-D blocks, each made of 256 threads
     // 1 thread por pixel
     int blockNum = ceil(width * height / 256);
     cudaEventRecord(start);
-    GPU_HoughTran<<<blockNum, 256>>>(d_in, width, height, d_hough, max_radius, rScale, d_Cos, d_Sin);
+    GPU_HoughTran<<<blockNum, 256>>>(image_in_device, width, height, d_hough, max_radius, radial_bin_width, precomputed_cos, precomputed_sin);
     cudaEventRecord(stop);
-
-    // get results from device
-    cudaMemcpy(h_hough, d_hough, sizeof(int) * total_degree_bins * total_radial_bins, cudaMemcpyDeviceToHost);
 
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
     // compare CPU and GPU results
-    int count = 0;
-    for (i = 0; i < total_degree_bins * total_radial_bins; i++) {
-        if (cpu_accumulator[i] != h_hough[i])
-            printf("Calculation mismatch at : %i %i %i\n", i, cpu_accumulator[i], h_hough[i]);
-        count++;
-    }
-    printf("Total mismatches: %i\n", count);
+    compare_results(cpu_accumulator, d_hough);
     printf("GPU time: %f ms\n", milliseconds);
     printf("Done!\n");
 
     inImg.to_jpg_with_line("out/test.jpg", cpu_accumulator, 4600, total_degree_bins, degree_increment, total_radial_bins);
 
-    // TODO clean-up
-    cudaFree(d_in);
+    cudaFree(image_in_device);
     cudaFree(d_hough);
-    free(h_hough);
     free(cpu_accumulator);
-    free(precomputed_cos);
-    free(precomputed_sin);
+    cudaFree(precomputed_sin);
+    cudaFree(precomputed_cos);
 
     return 0;
 }
