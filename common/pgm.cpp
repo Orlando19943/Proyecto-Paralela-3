@@ -96,7 +96,7 @@ int PGMImage::get_y(float radius, float degree, int x) {
     return y_dim / 2 - ((radius - (x - x_dim / 2) * cos(degree)) / sin(degree));
 }
 
-bool PGMImage::to_jpg_with_line(char *location, int *accumulator, int threshold, int total_degree_bins, int degree_increment, int total_radial_bins) {
+bool PGMImage::to_jpg_with_line(const char *location, int *accumulator, int threshold, int total_degree_bins, int degree_increment, int total_radial_bins) {
     Mat image = make_image();
 
     float max_radius = sqrt(1.0 * x_dim * x_dim + 1.0 * y_dim * y_dim) / 2;

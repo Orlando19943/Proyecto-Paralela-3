@@ -10,7 +10,7 @@ public:
     ~PGMImage();
     bool write(char *);
     bool to_jpg(char *);
-    bool to_jpg_with_line(char *, int *accumulator, int threshold, int total_degree_bins, int degree_increment, int total_radial_bins);
+    bool to_jpg_with_line(const char *, int *accumulator, int threshold, int total_degree_bins, int degree_increment, int total_radial_bins);
 
     int x_dim;
     int y_dim;
