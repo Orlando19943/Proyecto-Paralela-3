@@ -19,7 +19,7 @@
 const int degree_increment = 2;
 const int total_degree_bins = 180 / degree_increment;
 const int total_radial_bins = 100;
-const int threads_per_block = 32;
+const int threads_per_block = 256;
 const float degree_bin_width = degree_increment * M_PI / 180;
 
 const char* BOLD = "\033[1m";
@@ -124,14 +124,20 @@ __global__ void GPU_HoughTranShared(unsigned char *picture, int width, int heigh
     int local_id = threadIdx.x;
     int global_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (local_id == 0) {
-        for (int i = 0; i < total_degree_bins * total_radial_bins; i++) {
-            partial_accumulator[i] = 0;
-        }
+    // set the bins the thread is responsible for initializing and copying to master
+    int bins_per_thread = (total_degree_bins * total_radial_bins) / threads_per_block;
+    int bins_start = local_id * bins_per_thread;
+    int bins_end = (local_id + 1) * bins_per_thread;
+    if (local_id == threads_per_block - 1) {
+        bins_end = total_degree_bins * total_radial_bins;
+    }
+
+    // initialize memory to zero
+    for (int i = bins_start; i < bins_end; i++) {
+        partial_accumulator[i] = 0;
     }
 
     __syncthreads();
-
 
 
     if (global_id >= width * height)
@@ -147,20 +153,16 @@ __global__ void GPU_HoughTranShared(unsigned char *picture, int width, int heigh
         for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
             float radius = x * pre_cosine[bin_degree] + y * pre_sin[bin_degree];
             int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
-            atomicAdd(partial_accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
+            atomicAdd_block(partial_accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
         }
     }
 
     // sync cosos
     __syncthreads();
 
-    if (local_id == 0) {
-        for (int i = 0; i < total_degree_bins * total_radial_bins; i++) {
-            if (partial_accumulator[i] > 0) {
-                atomicAdd(accumulator + i, partial_accumulator[i]);
-            } else if (partial_accumulator[i] < 0) {
-                printf("wtf");
-            }
+    for (int i = bins_start; i < bins_end; i++) {
+        if (partial_accumulator[i] > 0) {
+            atomicAdd(accumulator + i, partial_accumulator[i]);
         }
     }
 }
