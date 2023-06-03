@@ -13,6 +13,7 @@
 #include <math.h>
 #include <cuda.h>
 #include <string.h>
+#include <unistd.h>
 #include "common/pgm.h"
 
 const int degree_increment = 2;
@@ -120,13 +121,21 @@ void precalculate_trigonometry(float **device_cosine, float **device_sin) {
 //*****************************************************************
 __global__ void GPU_HoughTranShared(unsigned char *picture, int width, int height, int *accumulator, float image_diagonal_length, float radial_bin_width) {
     __shared__ int partial_accumulator[total_degree_bins * total_radial_bins];
-
     int local_id = threadIdx.x;
     int global_id = blockIdx.x * blockDim.x + threadIdx.x;
 
+    if (local_id == 0) {
+        for (int i = 0; i < total_degree_bins * total_radial_bins; i++) {
+            partial_accumulator[i] = 0;
+        }
+    }
+
+    __syncthreads();
+
+
+
     if (global_id >= width * height)
         return;
-
 
     int x_center = width / 2;
     int y_center = height / 2;
@@ -138,7 +147,7 @@ __global__ void GPU_HoughTranShared(unsigned char *picture, int width, int heigh
         for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
             float radius = x * pre_cosine[bin_degree] + y * pre_sin[bin_degree];
             int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
-            atomicAdd(&partial_accumulator[radial_bin * total_degree_bins + bin_degree], 1);
+            atomicAdd(partial_accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
         }
     }
 
@@ -146,17 +155,14 @@ __global__ void GPU_HoughTranShared(unsigned char *picture, int width, int heigh
     __syncthreads();
 
     if (local_id == 0) {
-        for (int i = 0; i < width; i++) {
-            for (int j = 0; j < height; j++) {
-                int pixel = j * width + i;
-                if (partial_accumulator[pixel] > 0) {
-                    atomicAdd(&partial_accumulator[pixel], partial_accumulator[pixel]);
-                }
+        for (int i = 0; i < total_degree_bins * total_radial_bins; i++) {
+            if (partial_accumulator[i] > 0) {
+                atomicAdd(accumulator + i, partial_accumulator[i]);
+            } else if (partial_accumulator[i] < 0) {
+                printf("wtf");
             }
         }
-        printf("YAA TERMINEEE");
     }
-    __syncthreads();
 }
 
 __global__ void GPU_HoughTranConst(unsigned char *picture, int width, int height, int *accumulator, float image_diagonal_length, float radial_bin_width) {
@@ -261,14 +267,14 @@ int main(int argc, char **argv) {
     printf("\n%s%sGPU - No const nor shared mem%s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_degree_bins * total_radial_bins);
 
-//    cudaEventRecord(start);
-//    GPU_HoughTran<<<blockNum, threads_per_block>>>(image_in_device, width, height, device_accumulator, max_radius, radial_bin_width, precomputed_cos, precomputed_sin);
-//    cudaEventRecord(stop);
-//    cudaEventSynchronize(stop);
-//    cudaEventElapsedTime(&milliseconds, start, stop);
-//
-//    compare_results(cpu_accumulator, device_accumulator);
-//    printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
+    cudaEventRecord(start);
+    GPU_HoughTran<<<blockNum, threads_per_block>>>(image_in_device, width, height, device_accumulator, max_radius, radial_bin_width, precomputed_cos, precomputed_sin);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+    compare_results(cpu_accumulator, device_accumulator);
+    printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
 
     // ================================================================
     // GPU - Const Memory Only
@@ -289,21 +295,11 @@ int main(int argc, char **argv) {
     printf("\n%s%sGPU - No const nor shared mem%s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_degree_bins * total_radial_bins);
 
-
-//    cudaEventRecord(start);
-//    GPU_HoughTranShared<<<blockNum, threads_per_block>>>(image_in_device, width, height, device_accumulator, max_radius, radial_bin_width);
-//    cudaEventRecord(stop);
-//    cudaEventSynchronize(stop);
-//    cudaEventElapsedTime(&milliseconds, start, stop2;
-
-    cudaEvent_t start2, stop2;
-    cudaEventCreate(&start2);
-    cudaEventCreate(&stop2);
-    cudaEventRecord(start2);
+    cudaEventRecord(start);
     GPU_HoughTranShared<<<blockNum, threads_per_block>>>(image_in_device, width, height, device_accumulator, max_radius, radial_bin_width);
-    cudaEventRecord(stop2);
-    cudaEventSynchronize(stop2);
-    cudaEventElapsedTime(&milliseconds, start2, stop2);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&milliseconds, start, stop);
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
