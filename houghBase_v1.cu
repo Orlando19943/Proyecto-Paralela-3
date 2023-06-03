@@ -36,7 +36,17 @@ const char *GREEN = "\033[92m";
     cudaEventElapsedTime(time, start, stop)
 
 
+/*  ********************************** COMPARE RESULTS ************************************
+    * Compara los resultados en memoria de un array en cpu y otro array en memoria CUDA.
+    * Imprime las diferencias entre estos y si la diferencia es menor a uno se toma como
+    * un error de punto flotante.
+    *
+    * inputs:
+    *  - cpu_results: Puntero a los resultados en CPU.
+    *  - in_device_results: Puntero a memoria CUDA con los resultados a comparar
+    ***************************************************************************************/
 void compare_results(int *cpu_results, int *in_device_results) {
+    // copy device memory to local memory for comparison
     int *gpu_results = (int *) malloc(total_bins * sizeof(int));
     cudaMemcpy(gpu_results, in_device_results, sizeof(int) * total_bins, cudaMemcpyDeviceToHost);
 
@@ -59,6 +69,17 @@ void compare_results(int *cpu_results, int *in_device_results) {
     printf("Total mismatches: %i\n", mismatch);
 }
 
+/*  ********************************** CPU HOUGH TRANSFORM   ****************************
+    * Genera la tabla de votación de la transformada de Hough. Se ejecuta en el CPU.
+    *
+    * inputs:
+    * - picture: Puntero a la imagen a la que se le aplicará la transformada
+    * - width: ancho de la imagen
+    * - height: altura de la imagen
+    *
+    * output:
+    * - accumulator: Lista con la tabla de votación.
+    ***************************************************************************************/
 void CPU_HoughTran(const unsigned char *picture, int width, int height, int **accumulator) {
     float image_diagonal_length = sqrt(1.0 * width * width + 1.0 * height * height) / 2;
     int x, y;
@@ -75,16 +96,16 @@ void CPU_HoughTran(const unsigned char *picture, int width, int height, int **ac
     for (int i = 0; i < width; i++) {
         for (int j = 0; j < height; j++) {
             int pixel = j * width + i;
-            if (picture[pixel] > 0) {
-                // votar por todas las líneas que pasan por ese punto
-                x = i - x_center;   // medida desde el centro
-                y = y_center - j;   // medida desde el centro invertida
+            if (picture[pixel] > 0) {  // si el pixel está marcado
+                x = i - x_center;      // medida desde el centro
+                y = y_center - j;      // medida desde el centro invertida
                 theta = 0;
+                // votar por todas las líneas que pasan por ese punto
                 for (int degree_bin = 0; degree_bin < total_degree_bins; degree_bin++) {
                     float radius = x * cos(theta) + y * sin(theta);
                     int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
                     int bin = radial_bin * total_degree_bins + degree_bin;
-                    (*accumulator)[bin]++; //+1 para este radio radius y este theta
+                    (*accumulator)[bin]++;
                     theta += degree_bin_width;
                 }
             }
@@ -92,14 +113,24 @@ void CPU_HoughTran(const unsigned char *picture, int width, int height, int **ac
     }
 }
 
-//*****************************************************************
-__device__ __constant__ float pre_cosine[total_degree_bins];
-__device__ __constant__ float pre_sin[total_degree_bins];
+/*  ************************* PRECALCULATE TRIGONOMETRY *********************************
+    * Precalcula los senos y cosenos de los diferentes bins de los ángulos.
+    *
+    * También llena la memoria global const_cos y const_sin con los resultados.
+    *
+    * outputs:
+    * - device_cosine: Un puntero a una lista en memoria cuda con los cos precalculados
+    * - device_sine: Un puntero a una lista en memoria cuda con los sin precalculados
+    ***************************************************************************************/
+__device__ __constant__ float const_cos[total_degree_bins];
+__device__ __constant__ float const_sin[total_degree_bins];
 
 void precalculate_trigonometry(float **device_cosine, float **device_sin) {
+    // allocate cpu memory for results
     float *precomputed_cos = (float *) malloc(sizeof(float) * total_degree_bins);
     float *precomputed_sin = (float *) malloc(sizeof(float) * total_degree_bins);
 
+    // fill cpu precomputed values
     int i;
     float degree = 0;
     for (i = 0; i < total_degree_bins; i++) {
@@ -109,23 +140,36 @@ void precalculate_trigonometry(float **device_cosine, float **device_sin) {
         degree += degree_bin_width;
     }
 
-    // fill global const mem
-    cudaMemcpyToSymbol(pre_cosine, precomputed_cos, sizeof(float) * total_degree_bins);
-    cudaMemcpyToSymbol(pre_sin, precomputed_sin, sizeof(float) * total_degree_bins);
+    // move local to global const memory
+    cudaMemcpyToSymbol(const_cos, precomputed_cos, sizeof(float) * total_degree_bins);
+    cudaMemcpyToSymbol(const_sin, precomputed_sin, sizeof(float) * total_degree_bins);
 
-    // move to device
+    // move to device memory
     cudaMalloc((void **) device_cosine, sizeof(float) * total_degree_bins);
     cudaMalloc((void **) device_sin, sizeof(float) * total_degree_bins);
 
+    // free mem
     cudaMemcpy(*device_cosine, precomputed_cos, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
     cudaMemcpy(*device_sin, precomputed_sin, sizeof(float) * total_degree_bins, cudaMemcpyHostToDevice);
-
     free(precomputed_cos);
     free(precomputed_sin);
 }
 
 
-//*****************************************************************
+/*  ****************************** GPU HOUGH TRANS SHARED *********************************
+    * Precalcula la transformada de Hough en la GPU usando memoria compartida, usando cos
+    * y sin precalculados en memoria constante.
+    *
+    * inputs:
+    * - picture: Puntero de CUDA con la información de la imagen
+    * - width: Ancho de la imagen
+    * - height: Altura de la imagen
+    * - image_diagonal_length: la diagonal de la imagen precalculada
+    * - radial_bin_width: el ancho de cada casilla de la tabla en el eje del radio precalculado
+    *
+    * outputs:
+    * - accumulator: La lista de votación en CUDA llena.
+    ***************************************************************************************/
 __global__ void GPU_HoughTranShared(
         unsigned char *picture,
         int width, int height,
@@ -137,10 +181,11 @@ __global__ void GPU_HoughTranShared(
     int local_id = threadIdx.x;
     int global_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // set the bins the thread is responsible for initializing and copying to master
+    // set who's responsible for initializing and moving a bin to global
     int bins_per_thread = total_bins / threads_per_block;
     int bins_start = local_id * bins_per_thread;
     int bins_end = (local_id + 1) * bins_per_thread;
+    // assign remainder bins to the last thread
     if (local_id == threads_per_block - 1) {
         bins_end = total_degree_bins * total_radial_bins;
     }
@@ -165,7 +210,7 @@ __global__ void GPU_HoughTranShared(
     // fill local poll table
     if (picture[global_id] > 0) {
         for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
-            float radius = x * pre_cosine[bin_degree] + y * pre_sin[bin_degree];
+            float radius = x * const_cos[bin_degree] + y * const_sin[bin_degree];
             int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
             atomicAdd_block(partial_accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
         }
@@ -181,6 +226,21 @@ __global__ void GPU_HoughTranShared(
     }
 }
 
+
+/*  ****************************** GPU HOUGH TRANS CONST **********************************
+    * Precalcula la transformada de Hough en la GPU sin memoria compartida, usando cos
+    * y sin precalculados en memoria constante.
+    *
+    * inputs:
+    * - picture: Puntero de CUDA con la información de la imagen
+    * - width: Ancho de la imagen
+    * - height: Altura de la imagen
+    * - image_diagonal_length: la diagonal de la imagen precalculada
+    * - radial_bin_width: el ancho de cada casilla de la tabla en el eje del radio precalculado
+    *
+    * outputs:
+    * - accumulator: La lista de votación en CUDA llena.
+    ***************************************************************************************/
 __global__ void GPU_HoughTranConst(
         unsigned char *picture,
         int width,
@@ -202,13 +262,29 @@ __global__ void GPU_HoughTranConst(
 
     if (picture[global_id] > 0) {
         for (int bin_degree = 0; bin_degree < total_degree_bins; bin_degree++) {
-            float radius = x * pre_cosine[bin_degree] + y * pre_sin[bin_degree];
+            float radius = x * const_cos[bin_degree] + y * const_sin[bin_degree];
             int radial_bin = (radius + image_diagonal_length) / radial_bin_width;
             atomicAdd(accumulator + (radial_bin * total_degree_bins + bin_degree), 1);
         }
     }
 }
 
+/*  ****************************** GPU HOUGH TRANS ****************************************
+    * Precalcula la transformada de Hough en la GPU sin memoria compartida, usando cos
+    * y sin precalculados como parámetro.
+    *
+    * inputs:
+    * - picture: Puntero de CUDA con la información de la imagen
+    * - width: Ancho de la imagen
+    * - height: Altura de la imagen
+    * - image_diagonal_length: la diagonal de la imagen precalculada
+    * - radial_bin_width: el ancho de cada casilla de la tabla en el eje del radio precalculado
+    * - precomputed_cos: lista con todos los posibles valores de cos precalculados
+    * - precomputed_sin: lista con todos los posibles valores de sin precalculados
+    *
+    * outputs:
+    * - accumulator: La lista de votación en CUDA llena.
+    ***************************************************************************************/
 __global__ void GPU_HoughTran(
         unsigned char *picture,
         int width,
@@ -240,7 +316,9 @@ __global__ void GPU_HoughTran(
     }
 }
 
-//*****************************************************************
+//  ***************************************************************************************
+//  ************************************** START MAIN *************************************
+//  ***************************************************************************************
 int main(int argc, char **argv) {
     // get input from user
     if (argc < 2) {
