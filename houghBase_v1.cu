@@ -27,6 +27,13 @@ const char* RED = "\033[91m";
 const char* CLEAR = "\033[0m";
 const char* GREEN = "\033[92m";
 
+#define START_GPU_TIMING() cudaEventRecord(start);
+#define END_GPU_TIMING(time)      \
+    cudaEventRecord(stop);        \
+    cudaEventSynchronize(stop);   \
+    cudaEventElapsedTime(time, start, stop)
+
+
 void compare_results(int* cpu_results, int* in_device_results) {
     int *gpu_results = (int *) malloc(total_degree_bins * total_radial_bins * sizeof(int));
     cudaMemcpy(gpu_results, in_device_results, sizeof(int) * total_degree_bins * total_radial_bins, cudaMemcpyDeviceToHost);
@@ -269,11 +276,9 @@ int main(int argc, char **argv) {
     printf("\n%s%sGPU - No const nor shared mem%s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_degree_bins * total_radial_bins);
 
-    cudaEventRecord(start);
+    START_GPU_TIMING();
     GPU_HoughTran<<<blockNum, threads_per_block>>>(image_in_device, width, height, device_accumulator, max_radius, radial_bin_width, precomputed_cos, precomputed_sin);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&milliseconds, start, stop);
+    END_GPU_TIMING(&milliseconds);
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
@@ -283,11 +288,9 @@ int main(int argc, char **argv) {
     printf("\n%s%sGPU - No const nor shared mem%s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_degree_bins * total_radial_bins);
 
-    cudaEventRecord(start);
+    START_GPU_TIMING();
     GPU_HoughTranConst<<<blockNum, threads_per_block>>>(image_in_device, width, height, device_accumulator, max_radius, radial_bin_width);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&milliseconds, start, stop);
+    END_GPU_TIMING(&milliseconds);
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
@@ -297,11 +300,9 @@ int main(int argc, char **argv) {
     printf("\n%s%sGPU - No const nor shared mem%s\n", BOLD, RED, CLEAR);
     cudaMemset(device_accumulator, 0, sizeof(int) * total_degree_bins * total_radial_bins);
 
-    cudaEventRecord(start);
-    GPU_HoughTranShared<<<blockNum, threads_per_block>>>(image_in_device, width, height, device_accumulator, max_radius, radial_bin_width);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&milliseconds, start, stop);
+    START_GPU_TIMING();
+    GPU_HoughTranShared<<<blockNum, threads_per_block>>>(image_in_device, width,height,device_accumulator,max_radius,radial_bin_width);
+    END_GPU_TIMING(&milliseconds);
 
     compare_results(cpu_accumulator, device_accumulator);
     printf("%sGPU time: %f ms%s\n", GREEN, milliseconds, CLEAR);
